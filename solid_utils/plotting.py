@@ -1,6 +1,7 @@
 # Author: Marin Govorcin
 # June, 2024
 # Transient validation display function added by Saoussen Belhadj-aissa. July, 2024
+# Time-series display routines added by Robert Zinke. March 2025
 
 from typing import Callable
 import pandas as pd
@@ -10,7 +11,230 @@ from matplotlib import pyplot as plt
 from numpy.typing import NDArray
 
 
-def display_validation(pair_distance: NDArray, pair_difference: NDArray,
+## Time-series plotting routines
+from mintpy.mask import mask_matrix
+from mintpy.objects import timeseries
+from mintpy.utils import ptime, readfile
+
+def plot_ts_rmse(ax, date_list, ts, ref_dis=None):
+    """
+    """
+    # Parameters
+    n_dates = len(date_list)
+    positions = range(1, n_dates+1)
+
+    # Determine the RMSE of each layer
+    rmse = np.nanstd(ts, axis=(1,2))
+
+    # Plot results
+    markerline, stemlines, baseline = ax.stem(positions, 1000*rmse)
+    plt.setp(baseline, color="k")
+
+    # Plot reference line
+    if ref_dis is not None:
+        ax.axhline(ref_dis, color='k', linestyle='--')
+
+    # Format plot
+    ax.set_xticks(positions)
+    ax.set_xticklabels(date_list, rotation=80)
+
+    ax.set_ylabel('RMSE (mm)')
+
+
+def plot_ts_violins(ax, date_list, ts, ref_dis=None):
+    """
+    """
+    # Parameters
+    n_dates, M, N = ts.shape
+    MN = M * N
+    skips = MN // 1000
+
+    # Loop through layers
+    ts_violins = []
+    for i in range(n_dates):
+        ts_lyr = ts[i,...]
+        ts_lyr = ts_lyr[~np.isnan(ts_lyr)]
+
+        ts_violins.append(1000*ts_lyr[::skips])
+    ts_violins = np.column_stack(ts_violins)
+
+    # Remove mean for plotting purposes
+    ts_violins -= np.mean(ts_violins, axis=0)
+
+    # Statistics
+    ts_pcts = np.percentile(ts_violins, [16, 84], axis=0)
+
+    # Plot violins
+    positions = list(range(1, n_dates+1))
+    ax.violinplot(ts_violins, positions=positions, widths=0.9, showextrema=False)
+    ax.vlines(positions, ts_pcts[0,:], ts_pcts[1,:], lw=5)
+
+    # Plot reference lines
+    if ref_dis is not None:
+        ax.axhline(ref_dis, color='k', linestyle='--')
+        ax.axhline(-ref_dis, color='k', linestyle='--')
+
+    # Format plot
+    ax.set_xticks(positions)
+    ax.set_xticklabels(date_list, rotation=80)
+
+    ax.set_ylabel('Displacement Range (mm)')
+
+
+def plot_ts_stats(ts_file, msk_file, ref_dis=None, dates_per_fig=10):
+    """
+    """
+    # Read data cube
+    ts, _ = readfile.read(ts_file, datasetName='timeseries')
+    date_list = timeseries(ts_file).get_date_list()
+
+    # Mask data cube
+    if msk_file is not None:
+        msk, _ = readfile.read(msk_file, datasetName='mask')
+        ts = mask_matrix(ts, msk)
+
+    # Number of layers in dataset
+    n_lyrs = ts.shape[0]
+    print(f"{n_lyrs:d} layers found")
+
+    # Determine number of figures
+    n_figs = np.ceil(n_lyrs / dates_per_fig).astype(int)
+
+    # Loop through figures
+    for i in range(n_figs):
+        # Instantiate figure and axis
+        fig, axes = plt.subplots(figsize=(9, 5.5), nrows=2)
+
+        # Start and end indexes of data subset
+        start_ndx = i * dates_per_fig
+        end_ndx = start_ndx + dates_per_fig if i < (n_figs - 1) \
+            else start_ndx + n_lyrs % dates_per_fig
+
+        # Subset data
+        date_list_fig = date_list[start_ndx:end_ndx]
+        ts_fig = ts[start_ndx:end_ndx,...]
+
+        # Plot RMSE of each layer
+        plot_ts_rmse(axes[0], date_list_fig, ts_fig, ref_dis)
+        axes[0].set_xlim([0, dates_per_fig+1])
+        axes[0].set_xticklabels([])
+        if ref_dis is not None:
+            axes[0].set_ylim([0, 4*ref_dis])
+
+        # Violin plots of each layer
+        plot_ts_violins(axes[1], date_list_fig, ts_fig, ref_dis)
+        axes[1].set_xlim([0, dates_per_fig+1])
+        if ref_dis is not None:
+            axes[1].set_ylim([-4*ref_dis, 4*ref_dis])
+
+        # Format figure
+        fig.suptitle(f"Displacements ({date_list_fig[0]:s} "
+                     f"- {date_list_fig[-1]:s})")
+        fig.tight_layout()
+
+
+from solid_utils.fitting import IterativeOutlierFit
+
+def plot_ts_fits(ref_site:str, gnss_fits:dict, insar_fits:dict):
+    """Plot GNSS and InSAR timeseries and fit results, superimposed for each
+    GNSS site location.
+
+    For the GNSS and InSAR fits, one should pass a dictionary of
+    IterativeOutlierFit objects, with key:value pairs of
+    <site_name>:<fit_object>.
+
+    Parameters: ref_site - str, reference site name
+                gnss_fits - dict of IterativeOutlierFit objects
+                insar_fits - dict of IterativeOutlierFit objects
+    """
+    # Check validity of passed datasets
+    if gnss_fits.keys() != insar_fits.keys():
+        raise Execption('GNSS and InSAR fits must relate to the same stations')
+    site_names = [*gnss_fits.keys()]  # list of site names from dict keys
+
+    for value in [*gnss_fits.values()] + [*gnss_fits.values()]:
+        if type(value) != IterativeOutlierFit:
+            raise Exception('Fits must have type IterativeOutlierFit')
+
+    # Reference velocities
+    gnss_ref_vel = gnss_fits[ref_site].m_hat[1]
+    gnss_ref_vel_err = gnss_fits[ref_site].mhat_se[1]
+
+    insar_ref_vel = insar_fits[ref_site].m_hat[1]
+    insar_ref_vel_err = insar_fits[ref_site].mhat_se[1]
+    
+    # Loop through GNSS and InSAR sites
+    for site_name in site_names:
+        # Remove reference site velocity from GNSS velocity
+        gnss_offset = gnss_fits[site_name].m_hat[0]
+        gnss_vel_detr = gnss_fits[site_name].m_hat[1] - gnss_ref_vel
+        gnss_vel_detr_err = np.sqrt(gnss_fits[site_name].mhat_se[1]**2
+                                    + gnss_ref_vel_err**2)
+
+        # Remove reference site velocity from GNSS timeseries
+        gnss_dates = gnss_fits[site_name].dates
+        t_gnss = np.array([(date - gnss_dates[0]).days/365.25
+                           for date in gnss_dates])
+        gnss_dis_detr = gnss_fits[site_name].dis - gnss_ref_vel*t_gnss
+        gnss_fit_detr = gnss_fits[site_name].dis_hat - gnss_ref_vel*t_gnss
+
+        # Remove reference site velocity from InSAR velocity
+        insar_offset = insar_fits[site_name].m_hat[0]
+        insar_vel_detr = insar_fits[site_name].m_hat[1] - insar_ref_vel
+        insar_vel_detr_err = np.sqrt(insar_fits[site_name].mhat_se[1]**2
+                                     + insar_ref_vel_err**2)
+
+        # Remove reference site velocity from GNSS timeseries
+        insar_dates = insar_fits[site_name].dates
+        t_insar = np.array([(date - insar_dates[0]).days/365.25
+                           for date in insar_dates])
+        insar_dis_detr = insar_fits[site_name].dis - insar_ref_vel*t_insar
+        insar_fit_detr = insar_fits[site_name].dis_hat - insar_ref_vel*t_insar
+        insar_env_lo_detr = insar_fits[site_name].err_envelope[0] - insar_ref_vel*t_insar
+        insar_env_hi_detr = insar_fits[site_name].err_envelope[1] - insar_ref_vel*t_insar
+
+        # Plotting parameters
+        n_dates = len(gnss_fits[site_name].dates)
+        label_skips = n_dates//6
+    
+        # Spawn figure and axis
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.axhline(0, c='dimgrey', linestyle='--')
+    
+        # Plot filtered data and model fit
+        ax.scatter(gnss_dates, 1000*(gnss_dis_detr - gnss_offset),
+                   s=3**2, c='grey', alpha=0.5, label=f"GNSS")
+        ax.plot(gnss_dates, 1000*(gnss_fit_detr - gnss_offset), c='k')
+    
+        ax.scatter(insar_dates, 1000*(insar_dis_detr - insar_offset),
+                   s=5**2, c='orange', label='InSAR')
+        ax.plot(insar_dates, 1000*(insar_fit_detr - insar_offset),
+                c='orange', linewidth=2)
+        ax.fill_between(insar_dates,
+                        y1=1000*(insar_env_lo_detr - insar_offset),
+                        y2=1000*(insar_env_hi_detr - insar_offset),
+                        color='orange', alpha=0.3, label='95% conf')
+
+        # Format plot
+        ax.legend()
+        ax.set_xticks(gnss_dates[::label_skips])
+        ax.set_xticklabels([date.strftime('%Y-%m-%d') \
+                            for date in gnss_dates[::label_skips]],
+                           rotation=80)
+        ax.set_ylabel('LOS dis - detr (mm)')
+        title = site_name
+        if site_name == ref_site:
+            title += ' (ref)'
+        title += f"\n(GNSS {1000*gnss_vel_detr:.1f} " \
+                 + f"+- {1000*gnss_vel_detr_err:.2f} mm/yr)"
+        title += f"\n(InSAR {1000*insar_vel_detr:.1f} " \
+                 + f"+- {1000*insar_vel_detr_err:.2f} mm/yr)"
+        ax.set_title(title)
+        fig.tight_layout()
+
+
+## Validation display
+def display_validation(pair_distance: NDArray, pair_difference: NDArray, pair_difference_err: NDArray,
                        site_name: str, start_date: str, end_date: str,
                        requirement: float = 2, distance_rqmt: list = [0.1, 50],
                        n_bins: int = 10, threshold: float = 0.683, 
@@ -41,8 +265,9 @@ def display_validation(pair_distance: NDArray, pair_difference: NDArray,
    '''
    # init dataframe
    df = pd.DataFrame(np.vstack([pair_distance,
-                                pair_difference]).T,
-                                columns=['distance', 'double_diff'])
+                                pair_difference,
+                                pair_difference_err]).T,
+                                columns=['distance', 'double_diff', 'double_diff_err'])
 
    # remove nans
    df_nonan = df.dropna(subset=['double_diff'])
@@ -72,6 +297,8 @@ def display_validation(pair_distance: NDArray, pair_difference: NDArray,
    alpha = 0.6 if pair_difference.shape[0] < 1e4 else 0.2
    ax.scatter(df_nonan.distance, df_nonan.double_diff,
               color='black', s=ms, zorder=1, alpha=alpha, edgecolor='None')
+   ax.errorbar(df_nonan.distance, df_nonan.double_diff, yerr=df_nonan.double_diff_err,
+               color='black', linestyle='none', alpha=alpha, linewidth=0.5)
 
    ax.fill_between(distance_rqmt, 0, requirement, color='#e6ffe6', zorder=0, alpha=0.6)
    ax.fill_between(distance_rqmt, requirement, 21, color='#ffe6e6', zorder=0, alpha=0.6)
