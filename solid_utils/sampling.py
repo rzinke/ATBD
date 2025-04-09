@@ -3,9 +3,7 @@ import math
 import warnings
 import copy
 
-from solid_utils.variogram import remove_trend
 from mintpy.utils import utils as ut
-
 
 ## Record measurement values at site locations
 class SiteMeasurement:
@@ -133,6 +131,36 @@ class SiteDisplacement(SiteMeasurement):
 
 
 ## Collect samples from a raster dataset
+def remove_trend(x: np.ndarray,
+                 y: np.ndarray,
+                 data: np.ndarray) -> np.array:
+    """This performs a basic 2d linear regression and removes the trend from
+    the data. This is also known as 'de-ramping'.
+    Parameters
+    ----------
+    x : np.ndarray
+        x coordinates flattened
+    y : np.ndarray
+        y coordinates flattened
+    data : np.ndarray
+        Statistics/value to be de-trended
+    Returns
+    -------
+    np.array
+        The data with the fitted linear plane removed.
+    """
+    ones = np.ones(len(x))
+    A = np.stack([x, y, ones], axis=1)
+    ramp, _, _, _ = np.linalg.lstsq(A, data, rcond=None)
+
+    new_data = data - A @ ramp
+    return new_data
+
+
+## Collect samples from a raster dataset
+# Seed random number generator for consistency
+np.random.seed(1)
+
 # Seed random number generator for consistency
 np.random.seed(1)
 

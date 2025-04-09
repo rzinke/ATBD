@@ -10,7 +10,105 @@ from matplotlib import pyplot as plt
 from numpy.typing import NDArray
 
 
-def display_validation(pair_distance: NDArray, pair_difference: NDArray,
+def plot_insar_gnss_comparison(gnss_sites, insar_sites):
+    """Plot InSAR and GNSS site values on a 1:1 plot for visual comparison.
+
+    Parameters:
+        gnss_sites : dict - dictionary with site names as keys, and
+                            SiteMeasurement objects as values
+        insar_sites : dict - dictionary with site names as keys, and
+                             SiteMeasurement objects as values
+    Return
+        fig
+        ax
+    """
+    # Instantiate figure and axis
+    fig, ax = plt.subplots()
+    
+    # Loop through sites
+    for site_name in insar_sites.keys():
+        gnss_site = gnss_sites[site_name]
+        insar_site = insar_sites[site_name]
+        ax.errorbar(gnss_site.vel, insar_site.x,
+                    xerr=gnss_site.x_err, yerr=insar_site.x_err,
+                    linestyle='none', color='darkgrey', zorder=2)
+        ax.scatter(gnss_site.x, insar_site.x, s=3**2, c='k', zorder=3)
+    
+    # Plot 1:1 line
+    xlims = list(ax.get_xlim())
+    ylims = list(ax.get_ylim())
+    ax_lims = xlims + ylims
+    lims = [min(ax_lims), max(ax_lims)]
+    ax.plot(lims, lims, 'k--', label='1:1', zorder=1)
+
+    # Units
+    ex_site = [*insar_sites.values()][0]
+    quantity = ex_site.quantity
+    unit = ex_site.unit
+
+    # Format figure and axis
+    ax.legend()
+    ax.set_xlabel(f"GNSS ({unit:s})")
+    ax.set_ylabel(f"InSAR ({unit:s})")
+    ax.set_title(f"InSAR vs GNSS {quantity:s}")
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+    ax.set_aspect(1)
+
+    return fig, ax
+
+
+def plot_residuals_mapview(site_residuals:dict, cmap='viridis'):
+    """Plot the InSAR-GNSS residual value at each sample site in
+    map view.
+
+    Parameters:
+        site_residuals : dict - dictionary with site names as keys, and
+                                SiteMeasurement objects as values
+    Return
+        fig
+        ax
+    """
+    # Loop through site residuals
+    sites = []
+    lons = []
+    lats = []
+    resids = []
+    for site_name in site_residuals.keys():
+        site_resid = site_residuals[site_name]
+        sites.append(site_name)
+        lons.append(site_resid.site_lon)
+        lats.append(site_resid.site_lat)
+        resids.append(site_resid.x)
+
+    # Instantiate figure and axis
+    fig, ax = plt.subplots(figsize=(18, 5.5))
+
+    # Plot values
+    cax = ax.scatter(lons, lats, s=8**2, c=np.abs(resids), cmap=cmap)
+
+    # Plot site names
+    for i, site_name in enumerate(sites):
+        ax.text(lons[i], lats[i], sites[i])
+
+    # Units and colorbar
+    ex_site_resid = [*site_residuals.values()][0]
+    quantity = ex_site_resid.quantity
+    unit = ex_site_resid.unit
+    cbar = fig.colorbar(cax, ax=ax, orientation='vertical')
+    cbar.set_label(f"{quantity:s} resid ({unit:s})")
+
+    # Format plot
+    ax.set_title(f"InSAR - GNSS {quantity:s} residuals")
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_aspect(1)
+    fig.tight_layout()
+
+    return fig, ax
+
+
+def display_validation(pair_distance: NDArray, pair_difference: NDArray, pair_difference_err: NDArray,
                        site_name: str, start_date: str, end_date: str,
                        requirement: float = 2, distance_rqmt: list = [0.1, 50],
                        n_bins: int = 10, threshold: float = 0.683, 
@@ -44,8 +142,9 @@ def display_validation(pair_distance: NDArray, pair_difference: NDArray,
     """
     # Init dataframe
     df = pd.DataFrame(np.vstack([pair_distance,
-                                 pair_difference]).T,
-                                 columns=['distance', 'double_diff'])
+                                 pair_difference,
+                                 pair_difference_err]).T,
+                                 columns=['distance', 'double_diff', 'double_diff_err'])
 
     # Remove nans
     df_nonan = df.dropna(subset=['double_diff'])
@@ -76,6 +175,8 @@ def display_validation(pair_distance: NDArray, pair_difference: NDArray,
     alpha = 0.6 if pair_difference.shape[0] < 1e4 else 0.2
     ax.scatter(df_nonan.distance, df_nonan.double_diff,
                color='black', s=ms, zorder=1, alpha=alpha, edgecolor='None')
+    ax.errorbar(df_nonan.distance, df_nonan.double_diff, yerr=df_nonan.double_diff_err,
+                color='black', linestyle='none', alpha=alpha, linewidth=0.5)
 
     ax.fill_between(distance_rqmt, 0, requirement, color='#e6ffe6', zorder=0, alpha=0.6)
     ax.fill_between(distance_rqmt, requirement, 21, color='#ffe6e6', zorder=0, alpha=0.6)

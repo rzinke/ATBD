@@ -2,119 +2,210 @@
 # recommended usage:
 #   from solid_utils import variogram
 
-import itertools
 import numpy as np
-from scipy.spatial.distance import pdist
-from scipy.stats import binned_statistic
+import scipy as sp
+import matplotlib.pyplot as plt
+
+from solid_utils.sampling import load_geo, rand_samp, remove_trend, pair_up
+
+class EmpiricalSemivariogram:
+    def __init__(self, data, metadata):
+        """Iniitialize object and store parameters.
+
+        Parameters: data - np.ndarray, 2D array of image values
+                    metadata - dict, MintPy metadata object
+        """
+        # Load data
+        self.data = data
+        self.metadata = metadata
+
+    # Sampling
+    def sample_data(self, n_samples:int, valid_range=(0.1, 50), n_bins=15):
+        """
+        """
+        # Collect data
+        self.__collect_data__(n_samples, valid_range)
+
+        # Bin data
+        self.__bin_data__(valid_range, n_bins)
+
+    def __collect_data__(self, n_samples, valid_range):
+        # Ensure integer type
+        n_samples = int(n_samples)
+
+        # Determine coordinates of each pixel
+        x, y = load_geo(self.metadata)
+        X, Y = np.meshgrid(x, y)
+        data = self.data.flatten()
+
+        # Remove NaNs
+        nan_ndx = np.isnan(data)
+        data = data[~nan_ndx]
+        X = X.flatten()[~nan_ndx]
+        Y = Y.flatten()[~nan_ndx]
+
+        # Collect random samples from grid
+        samp_data, samp_X, samp_Y = rand_samp(data, X, Y, n_samples)
+
+        # Remove ramp
+        samp_data = remove_trend(samp_X, samp_Y, samp_data)
+
+        # Form random points into pairs and compute distance
+        dists, resids = pair_up(samp_X, samp_Y, samp_data)
+
+        # Trim to range
+        valid_ndx = (dists >= valid_range[0]) \
+                & (dists <= valid_range[1])
+        dists = dists[valid_ndx]
+        resids = resids[valid_ndx]
+
+        # Compute squared residual values
+        semivar = 0.5 * resids**2
+
+        # Record samples
+        self.dists = dists
+        self.semivar = semivar
+
+    def __bin_data__(self, valid_range, n_bins):
+        # Define bins
+        self.bin_edges = np.linspace(valid_range[0], valid_range[1], n_bins+1)
+        self.bin_dists = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2
+
+        # Determine bin indices
+        bin_ndxs = [(self.dists >= self.bin_edges[n]) \
+                & (self.dists < self.bin_edges[n+1]) \
+                for n in range(n_bins)]
+
+        # Loop through bins
+        self.bin_semivar = np.empty(n_bins)
+        self.bin_semivar[:] = np.nan
+        for n in range(n_bins):
+            self.bin_semivar[n] = np.nanmean(
+                    self.semivar[bin_ndxs[n]])
+
+    # Fitting
+    @staticmethod
+    def exponential_model(d, nug, rng, sill):
+        a = 1 / 3
+        p = (sill - nug)
+        g = p * (1 - np.exp(-d / (a * rng))) + nug
+        return g
+
+    @staticmethod
+    def gaussian_model(d, nug, rng, sill):
+        p = (sill - nug)
+        g = p * (1 - np.exp(-(d**2) / (4/7*rng)**2)) + nug
+        return g
+
+    @staticmethod
+    def spherical_model(d, nug, rng, sill):
+        g = np.zeros(len(d))
+        p = (sill - nug)
+        g[d<=rng] = p \
+                * (((3*d[d<=rng])/(2*rng)) \
+                   - ((d[d<=rng]**3)/(2*rng**3))) \
+                + nug
+        g[d>rng] = p + nug
+        return g
+
+    @staticmethod
+    def hole_effect_model(d, nug, rng, sill):
+        p = (sill - nug)
+        g = p * (1 - (1 - (d/(rng/3))) * np.exp(-d/(rng/3))) + nug
+        return g
+
+    @staticmethod
+    def powerlaw_model(d, a, b):
+        g = a * d**b
+        return g
+
+    def fit(self, model_type='exponential'):
+        # Determine model to use
+        self.model_type = model_type
+        if model_type in ['exponential']:
+            self.model = self.exponential_model
+        elif model_type in ['gaussian']:
+            self.model = self.gaussian_model
+        elif model_type in ['spherical']:
+            self.model = self.spherical_model
+        elif model_type in ['hole_effect']:
+            self.model = self.hole_effect_model
+        elif model_type in ['powerlaw']:
+            self.model = self.powerlaw_model
+        else:
+            raise ValueError('Specified model does not exist')
+
+        # Normalize parameters for better fitting
+        d_scale = self.bin_dists.max() if self.model_type \
+                not in ['powerlaw'] else 1.
+        d_norm = self.bin_dists / d_scale
+
+        semivar_scale = self.bin_semivar.max() if self.model_type \
+                not in ['powerlaw'] else 1.
+        semivar_norm = self.bin_semivar / semivar_scale
+
+        # Fit model to data
+        popt, pcov = sp.optimize.curve_fit(self.model, d_norm, semivar_norm)
+
+        # Rescale fit parameters
+        if self.model_type not in ['powerlaw']:
+            popt[0] *= semivar_scale  # nugget
+            popt[1] *= d_scale  # range
+            popt[2] *= semivar_scale  # sill
+
+        # Record parameters
+        self.fit_params = popt
+        self.fit_params_err = np.sqrt(np.diag(pcov))
+
+    def predict(self, d:float|np.ndarray):
+        return self.model(d, *self.fit_params)
 
 
-def remove_trend(x: np.ndarray,
-                y: np.ndarray,
-                data: np.ndarray) -> np.array:
-    """This performs a basic 2d linear regression and removes the trend from
-    the data. This is also known as 'de-ramping'.
-    Parameters
-    ----------
-    x : np.ndarray
-        x coordinates flattened
-    y : np.ndarray
-        y coordinates flattened
-    data : np.ndarray
-        Statistics/value to be de-trended
-    Returns
-    -------
-    np.array
-        The data with the fitted linear plane removed.
-    """
-    ones = np.ones(len(x))
-    A = np.stack([x, y, ones], axis=1)
-    ramp, _, _, _ = np.linalg.lstsq(A, data, rcond=None)
+    # Reporting
+    def report(self):
+        print(f"{len(self.dists):d} samples")
+        print(f"{len(self.bin_dists):d} bins")
+        if hasattr(self, 'model'):
+            print(f"Model fit: {self.model_type.upper()}")
 
-    new_data = data - A @ ramp
-    return new_data
+            if self.model_type in ['powerlaw']:
+                print(f"\ta: {self.fit_params[0]:.4f} "
+                      f"+- {self.fit_params_err[0]:.4f}")
+                print(f"\tb: {self.fit_params[1]:.4f} "
+                      f"+- {self.fit_params_err[1]:.4f}")
+            else:
+                print(f"\tnugget: {self.fit_params[0]:.4f} "
+                      f"+- {self.fit_params_err[0]:.4f}")
+                print(f"\trange: {self.fit_params[1]:.4f} "
+                      f"+- {self.fit_params_err[1]:.4f}")
+                print(f"\tsill: {self.fit_params[2]:.4f} "
+                      f"+- {self.fit_params_err[2]:.4f}")
 
+    def plot(self):
+        # Instantiate figure and axis
+        fig, ax = plt.subplots()
 
-def get_emp_variogram(x: np.ndarray,
-                      y: np.ndarray,
-                      data: np.ndarray,
-                      n_samples: int = None) -> tuple:
-    """
-    Obtains the (distances, empirical variogram) from de-trended data.
-    Primary model assumptions are the mean is zero and the variance depends on
-    space alone.
-    Parameters
-    ----------
-    x : np.ndarray
-        The x-coordinates
-    y : np.ndarray
-        The y-coordinate
-    data : np.ndarray
-        Statistic to construct variogram
-    n_samples : int, optional
-        How many samples to use (if None, then all samples used), by default
-        None
-    Returns
-    -------
-    tuple [np.ndarray, np.ndarray]
-        (distances, variogram)
-    """
+        # Plot raw data
+        ax.scatter(self.dists, self.semivar, s=0.3, c='k',
+                   alpha=0.2, label='raw samps')
 
-    # Check if all the arrays are of the same shape
-    assert((x.shape == y.shape) and
-           (y.shape == data.shape)
-           )
+        # Plot binned data
+        ax.scatter(self.bin_dists, self.bin_semivar, s=8, c='b',
+                   label='binned')
 
-    x_, y_, data_ = x, y, data
-    if n_samples is not None:
-        n = len(x)
-        samples = sorted(np.random.choice(n, n_samples, replace=False))
-        x_ = x[samples]
-        y_ = y[samples]
-        data_ = data[samples]
+        # Plot model if available
+        if hasattr(self, 'model'):
+            ax.plot(self.bin_dists, self.predict(self.bin_dists),
+                    c='dodgerblue', linewidth=3,
+                    label=f"{self.model_type} model")
 
-    xy_pairs = np.stack([x_, y_], axis=1)
-    distances = pdist(xy_pairs)
+        # Basic plot formatting
+        ax.set_title('Semivariogram')
+        ax.set_xlabel('Distance (km)')
+        ax.set_ylabel(f"Semivariance ({self.metadata['UNIT']})")
 
-    combinations = list(itertools.combinations(range(len(x_)), 2))
-    pair_ind_0, pair_ind_1 = zip(*combinations)
+        ylim = [0, np.percentile(self.semivar, 90)]
+        ax.set_ylim(ylim)
+        ax.legend()
 
-    data_0 = data_[list(pair_ind_0)]
-    data_1 = data_[list(pair_ind_1)]
-
-    # Dissimilarity
-    # This is the empirical variance of zero mean data
-    variogram = 0.5 * np.square(data_0 - data_1)
-
-    return distances, variogram
-
-
-def bin_variogram(distance: np.ndarray,
-                  variogram: np.ndarray,
-                  bins: int = 20,
-                  distance_range: list = None) -> tuple:
-    """Bin the distances and variogram for analysis
-    Parameters
-    ----------
-    distance : np.ndarray
-        Pairwise distances
-    variogram : np.ndarray
-        Variogram values associated with pairwise distances
-    bins : int, optional
-        Number of bins, by default 20
-    distance_range : list, optional
-        The range of distance to analyze (if None, whole range used), by default
-        None.
-    Returns
-    -------
-    tuple [np.ndarray, np.ndarray]
-        (binned distances, binned variogram)
-    """
-
-    distance_range = distance_range or [0, np.nanmax(distance)]
-
-    distance_binned, _, _ = binned_statistic(distance, distance,
-                                             bins=bins, range=distance_range)
-    variogram_binned, _, _ = binned_statistic(distance, variogram,
-                                              bins=bins, range=distance_range)
-
-    return distance_binned, variogram_binned
+        return fig, ax
