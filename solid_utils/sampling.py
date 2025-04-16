@@ -3,8 +3,11 @@ import math
 import warnings
 import copy
 
-from solid_utils.variogram import remove_trend
 from mintpy.utils import utils as ut
+
+
+# Seed random number generator for consistency
+np.random.seed(1)
 
 
 ## Record measurement values at site locations
@@ -66,19 +69,23 @@ class SiteMeasurement:
         self.x_err = x_err
         self.unit = unit
 
-    def report(self, scale=1., print_unit=None):
-        """Print the site name, measurement value, and uncertainty.
+    def __str__(self):
+        """Forumalte the print string from available attributes.
         """
-        # Units to print
-        if scale != 1. and print_unit is None:
-            warnings.warn('Print scale was reset but units were not adjusted')
-        print_unit = self.unit if print_unit is None else print_unit
+        # Initialize string with site name
+        print_str = f"{self.site:s}"
 
-        report_str = f"{self.site:s} " \
-                + f"{scale*self.x:.2f} +- {scale*self.x_err:.2f} " \
-                + f"{print_unit:s}"
+        # Append measurement value
+        print_str += f" {self.x:.2f}"
 
-        return report_str
+        # Append measurement value error if available
+        if not np.isnan(self.x_err):
+            print_str += f" +- {self.x_err:.3f}"
+
+        # Append units
+        print_str += f" {self.unit:s}"
+
+        return print_str
 
     def __sub__(self, other):
         """Subtract the measured value of the "other" site from this site.
@@ -102,7 +109,6 @@ class SiteMeasurement:
 
         return resid
 
-
 class SiteVelocity(SiteMeasurement):
     """Child class of SiteMeasurement specifically for velocity measurements.
     Inherits attributes of SiteMeasurement.
@@ -114,7 +120,8 @@ class SiteVelocity(SiteMeasurement):
     vel = SiteMeasurement.x
     vel_err = SiteMeasurement.x_err
 
-    def __init__(self, site, site_lon, site_lat, vel, vel_err, unit='m/y'):
+    def __init__(self, site, site_lon, site_lat, vel, vel_err=np.nan,
+                 unit='m/y'):
         super().__init__(site, site_lon, site_lat, vel, vel_err, unit)
 
 class SiteDisplacement(SiteMeasurement):
@@ -128,13 +135,36 @@ class SiteDisplacement(SiteMeasurement):
     dis = SiteMeasurement.x
     dis_err = SiteMeasurement.x_err
 
-    def __init__(self, site, site_lon, site_lat, dis, dis_err, unit='m'):
+    def __init__(self, site, site_lon, site_lat, dis, dis_err=np.nan,
+                 unit='m'):
         super().__init__(site, site_lon, site_lat, dis, dis_err, unit)
 
 
 ## Collect samples from a raster dataset
-# Seed random number generator for consistency
-np.random.seed(1)
+def remove_trend(x: np.ndarray,
+                y: np.ndarray,
+                data: np.ndarray) -> np.array:
+    """This performs a basic 2d linear regression and removes the trend from
+    the data. This is also known as 'de-ramping'.
+    Parameters
+    ----------
+    x : np.ndarray
+        x coordinates flattened
+    y : np.ndarray
+        y coordinates flattened
+    data : np.ndarray
+        Statistics/value to be de-trended
+    Returns
+    -------
+    np.array
+        The data with the fitted linear plane removed.
+    """
+    ones = np.ones(len(x))
+    A = np.stack([x, y, ones], axis=1)
+    ramp, _, _, _ = np.linalg.lstsq(A, data, rcond=None)
+
+    new_data = data - A @ ramp
+    return new_data
 
 def load_geo(attr_geo):
     """This program calculate the coordinate of the geocoded files
